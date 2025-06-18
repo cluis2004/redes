@@ -443,6 +443,15 @@
                                 class="w-full bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-700 transition-colors text-sm">
                             ✨ Auto Layout
                         </button>
+                        
+                        <!-- Debug Info -->
+                        <div class="mt-4 pt-2 border-t border-gray-200">
+                            <div class="text-xs text-gray-500 space-y-1">
+                                <div>Mouse: <span id="mouse-coords">--</span></div>
+                                <div>Zoom: <span id="debug-zoom">100%</span></div>
+                                <div>Pan: <span id="debug-pan">0, 0</span></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -489,13 +498,15 @@
                 <div id="canvas-container" class="w-full h-full relative overflow-hidden">
                     <!-- SVG Canvas -->
                     <svg id="network-canvas" 
-                         class="w-full h-full cursor-default"
+                         class="w-full h-full"
+                         style="cursor: grab; height: 500px;"
                          ondrop="handleDrop(event)" 
                          ondragover="handleDragOver(event)"
                          onclick="handleCanvasClick(event)"
                          onwheel="handleWheel(event)"
                          onmousedown="handleCanvasMouseDown(event)"
-                         viewBox="0 0 1200 800">
+                         viewBox="0 0 1200 800"
+                         preserveAspectRatio="xMidYMid meet">
                         
                         <!-- Grid Pattern -->
                         <defs>
@@ -676,12 +687,17 @@ function handleDragOver(event) {
 
 function handleDrop(event) {
     event.preventDefault();
-    const componentType = event.dataTransfer.getData('text/plain');
-    const rect = event.target.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    console.log('Drop event triggered');
     
-    createComponent(componentType, x, y);
+    const componentType = event.dataTransfer.getData('text/plain');
+    if (!componentType) return;
+    
+    // Convert screen coordinates to SVG coordinates considering zoom/pan
+    const svgCoords = screenToSVG(event.clientX, event.clientY);
+    
+    console.log('Dropping component:', componentType, 'at', svgCoords.x, svgCoords.y);
+    
+    createComponent(componentType, svgCoords.x, svgCoords.y);
 }
 
 // Create component on canvas
@@ -1031,7 +1047,7 @@ function toggleConnectionMode() {
 
 // Component interaction handlers
 function handleComponentMouseDown(event, component) {
-    if (connectionMode) return; // Don't drag in connection mode
+    if (connectionMode || isPanning) return; // Don't drag in connection mode or while panning
     
     event.preventDefault();
     event.stopPropagation();
@@ -1040,14 +1056,15 @@ function handleComponentMouseDown(event, component) {
     isDragging = false;
     selectedComponent = component;
     
-    const canvas = document.getElementById('network-canvas');
-    const canvasRect = canvas.getBoundingClientRect();
+    // Convert screen coordinates to SVG coordinates
+    const svgCoords = screenToSVG(event.clientX, event.clientY);
     
     dragStartPos.x = event.clientX;
     dragStartPos.y = event.clientY;
     
-    dragOffset.x = event.clientX - canvasRect.left - component.x;
-    dragOffset.y = event.clientY - canvasRect.top - component.y;
+    // Calculate drag offset in SVG coordinates
+    dragOffset.x = svgCoords.x - component.x;
+    dragOffset.y = svgCoords.y - component.y;
     
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -1061,7 +1078,7 @@ function handleComponentClick(event, component) {
 }
 
 function handleMouseMove(event) {
-    if (!selectedComponent || connectionMode) return;
+    if (!selectedComponent || connectionMode || isPanning) return;
     
     // Check if we should start dragging
     if (!isDragging) {
@@ -1079,15 +1096,15 @@ function handleMouseMove(event) {
     
     event.preventDefault();
     
-    const canvas = document.getElementById('network-canvas');
-    const rect = canvas.getBoundingClientRect();
+    // Convert screen coordinates to SVG coordinates considering zoom/pan
+    const svgCoords = screenToSVG(event.clientX, event.clientY);
     
-    selectedComponent.x = event.clientX - rect.left - dragOffset.x;
-    selectedComponent.y = event.clientY - rect.top - dragOffset.y;
+    selectedComponent.x = svgCoords.x - dragOffset.x;
+    selectedComponent.y = svgCoords.y - dragOffset.y;
     
-    // Constrain to canvas bounds
-    selectedComponent.x = Math.max(0, Math.min(selectedComponent.x, rect.width - selectedComponent.width));
-    selectedComponent.y = Math.max(0, Math.min(selectedComponent.y, rect.height - selectedComponent.height));
+    // Constrain to canvas bounds (SVG coordinates)
+    selectedComponent.x = Math.max(0, Math.min(selectedComponent.x, canvasViewBox.width - selectedComponent.width));
+    selectedComponent.y = Math.max(0, Math.min(selectedComponent.y, canvasViewBox.height - selectedComponent.height));
     
     const element = document.getElementById(selectedComponent.id);
     if (element) {
@@ -1615,12 +1632,204 @@ window.debugComponents = function() {
     console.log('DOM connections:', document.querySelectorAll('#connections path').length);
 }
 
+// ========== ZOOM AND PAN FUNCTIONALITY ==========
+
+// Convert screen coordinates to SVG coordinates
+function screenToSVG(screenX, screenY) {
+    const canvas = document.getElementById('network-canvas');
+    const rect = canvas.getBoundingClientRect();
+    
+    // Convert to normalized coordinates (0-1)
+    const normalizedX = (screenX - rect.left) / rect.width;
+    const normalizedY = (screenY - rect.top) / rect.height;
+    
+    // Convert to SVG coordinates
+    const svgX = normalizedX * canvasViewBox.width;
+    const svgY = normalizedY * canvasViewBox.height;
+    
+    // Account for zoom and pan transforms
+    const transformedX = (svgX / zoomScale) - panX;
+    const transformedY = (svgY / zoomScale) - panY;
+    
+    return { x: transformedX, y: transformedY };
+}
+
+// Update the canvas transform
+function updateCanvasTransform() {
+    const content = document.getElementById('canvas-content');
+    if (content) {
+        content.setAttribute('transform', `scale(${zoomScale}) translate(${panX}, ${panY})`);
+    }
+    
+    // Update zoom level display
+    document.getElementById('zoom-level').textContent = Math.round(zoomScale * 100) + '%';
+    
+    // Update debug info
+    const debugZoom = document.getElementById('debug-zoom');
+    const debugPan = document.getElementById('debug-pan');
+    if (debugZoom) debugZoom.textContent = Math.round(zoomScale * 100) + '%';
+    if (debugPan) debugPan.textContent = `${Math.round(panX)}, ${Math.round(panY)}`;
+}
+
+// Update cursor based on current mode
+function updateCanvasCursor() {
+    const canvas = document.getElementById('network-canvas');
+    if (!canvas) return;
+    
+    if (connectionMode) {
+        canvas.style.cursor = 'crosshair';
+    } else if (isPanning) {
+        canvas.style.cursor = 'grabbing';
+    } else if (selectedComponent && isDragging) {
+        canvas.style.cursor = 'move';
+    } else {
+        canvas.style.cursor = 'grab';
+    }
+}
+
+// Handle mouse wheel for zooming
+function handleWheel(event) {
+    event.preventDefault();
+    
+    const zoomFactor = 0.1;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+    
+    // Calculate zoom center in SVG coordinates
+    const svgPoint = screenToSVG(event.clientX, event.clientY);
+    
+    if (event.deltaY < 0) {
+        // Zoom in
+        zoomScale = Math.min(zoomScale * (1 + zoomFactor), 3.0);
+    } else {
+        // Zoom out
+        zoomScale = Math.max(zoomScale * (1 - zoomFactor), 0.1);
+    }
+    
+    updateCanvasTransform();
+}
+
+// Canvas mouse down - start panning or component interaction
+function handleCanvasMouseDown(event) {
+    if (connectionMode || selectedComponent || isDragging) {
+        return; // Don't pan in connection mode or when dragging components
+    }
+    
+    // Check if we clicked on empty space
+    if (event.target.id === 'network-canvas' || 
+        (event.target.tagName === 'rect' && event.target.getAttribute('fill') === 'url(#grid)')) {
+        isPanning = true;
+        panStartPos.x = event.clientX;
+        panStartPos.y = event.clientY;
+        
+        event.preventDefault();
+        
+        document.addEventListener('mousemove', handleCanvasPan);
+        document.addEventListener('mouseup', handleCanvasPanEnd);
+        updateCanvasCursor();
+    }
+}
+
+// Handle canvas panning
+function handleCanvasPan(event) {
+    if (!isPanning) return;
+    
+    const deltaX = (event.clientX - panStartPos.x) / zoomScale;
+    const deltaY = (event.clientY - panStartPos.y) / zoomScale;
+    
+    panX += deltaX;
+    panY += deltaY;
+    
+    panStartPos.x = event.clientX;
+    panStartPos.y = event.clientY;
+    
+    updateCanvasTransform();
+}
+
+// End canvas panning
+function handleCanvasPanEnd(event) {
+    isPanning = false;
+    document.removeEventListener('mousemove', handleCanvasPan);
+    document.removeEventListener('mouseup', handleCanvasPanEnd);
+    updateCanvasCursor();
+}
+
+// Zoom controls
+function zoomIn() {
+    zoomScale = Math.min(zoomScale * 1.2, 3.0);
+    updateCanvasTransform();
+}
+
+function zoomOut() {
+    zoomScale = Math.max(zoomScale / 1.2, 0.1);
+    updateCanvasTransform();
+}
+
+function resetZoom() {
+    zoomScale = 1.0;
+    panX = 0;
+    panY = 0;
+    updateCanvasTransform();
+}
+
+function zoomToFit() {
+    if (components.length === 0) {
+        resetZoom();
+        return;
+    }
+    
+    // Calculate bounding box of all components
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+    
+    components.forEach(component => {
+        minX = Math.min(minX, component.x);
+        minY = Math.min(minY, component.y);
+        maxX = Math.max(maxX, component.x + component.width);
+        maxY = Math.max(maxY, component.y + component.height);
+    });
+    
+    // Add padding
+    const padding = 50;
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+    
+    // Calculate scale to fit
+    const contentWidth = maxX - minX;
+    const contentHeight = maxY - minY;
+    const scaleX = canvasViewBox.width / contentWidth;
+    const scaleY = canvasViewBox.height / contentHeight;
+    
+    zoomScale = Math.min(scaleX, scaleY, 2.0);
+    
+    // Center the content
+    panX = (canvasViewBox.width / zoomScale - contentWidth) / 2 - minX / zoomScale;
+    panY = (canvasViewBox.height / zoomScale - contentHeight) / 2 - minY / zoomScale;
+    
+    updateCanvasTransform();
+}
+
 // Initialize the visual editor when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('network-canvas')) {
         console.log('Editor visual inicializado');
         updateNetworkAnalysis();
         calculateSignalPaths();
+        updateCanvasTransform(); // Initialize zoom/pan
+        updateCanvasCursor(); // Initialize cursor
+        
+        // Add mouse tracking for debug info
+        const canvas = document.getElementById('network-canvas');
+        canvas.addEventListener('mousemove', function(event) {
+            const svgCoords = screenToSVG(event.clientX, event.clientY);
+            const mouseDisplay = document.getElementById('mouse-coords');
+            if (mouseDisplay) {
+                mouseDisplay.textContent = `${Math.round(svgCoords.x)}, ${Math.round(svgCoords.y)}`;
+            }
+        });
     }
 });
 </script>
